@@ -17,4 +17,5 @@ flask-bcrypt>=1.0.1
 flask-jwt-extended>=4.5.0
 flask-caching>=2.0.0
 flask-restful>=0.3.9
-
+langchain-openai>=1.0.2
+python-dotenv>=1.0.0

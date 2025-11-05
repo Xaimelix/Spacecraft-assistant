@@ -3,3 +3,6 @@ uploads/
 rag_store/
 __pycache__/
 venv/
+api_key.env
+uploads/
+.gitignore
