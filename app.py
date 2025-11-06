@@ -10,6 +10,17 @@ from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
+# Опциональные импорты для оффлайн LLM
+try:
+    from langchain_ollama import ChatOllama
+except ImportError:
+    ChatOllama = None
+
+try:
+    from langchain_community.llms import HuggingFacePipeline
+except ImportError:
+    HuggingFacePipeline = None
+
 from vector_base import (
     update_knowledge_base,
     create_document,
@@ -22,6 +33,131 @@ from dotenv import load_dotenv
 UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
 ALLOWED_EXTENSIONS = {"pdf", "txt"}
 load_dotenv("api_key.env")
+
+
+# Кэш для LLM модели (чтобы не пересоздавать каждый раз)
+_llm_cache = None
+_model_info_cache = None  # Информация о модели в кэше
+
+
+def get_llm(model_mode: str = "auto"):
+    """
+    Получает LLM модель для генерации ответов.
+    
+    Args:
+        model_mode: Режим выбора модели:
+            - "auto": автоматический выбор (приоритет: оффлайн > онлайн)
+            - "offline": только оффлайн модели (Ollama/HuggingFace)
+            - "online": только онлайн модели (OpenAI/Timeweb)
+    
+    Returns:
+        LLM модель или None, если ничего не доступно
+    """
+    global _llm_cache, _model_info_cache
+    
+    # Для режима "auto" используем кэш
+    # Для других режимов всегда проверяем заново
+    if model_mode == "auto":
+        if _llm_cache is not None and _llm_cache is not False:
+            # Если в кэше есть модель, возвращаем её с информацией о модели
+            return _llm_cache, _model_info_cache or "Кэшированная модель"
+        if _llm_cache is False:
+            return None, None
+    
+    model_used = None  # Для отслеживания какой модели используется
+    
+    # 1. Попытка использовать Ollama (оффлайн, локальный)
+    if model_mode in ("auto", "offline") and ChatOllama is not None:
+        ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
+        ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+        try:
+            llm = ChatOllama(
+                model=ollama_model,
+                base_url=ollama_base_url,
+                temperature=0,
+            )
+            # Легкая проверка доступности через простой запрос
+            try:
+                test_response = llm.invoke([HumanMessage(content="ok")])
+                if test_response and test_response.content:
+                    model_used = f"Ollama ({ollama_model})"
+                    print(f"✓ Используется Ollama модель: {ollama_model}")
+                    if model_mode == "auto":
+                        _llm_cache = llm
+                        _model_info_cache = model_used
+                    return llm, model_used
+            except Exception:
+                pass  # Ollama не отвечает, пробуем дальше
+        except Exception as e:
+            print(f"Ollama недоступен: {e}")
+    
+    # 2. Попытка использовать локальную HuggingFace модель (оффлайн)
+    hf_model = os.getenv("HF_MODEL")
+    if model_mode in ("auto", "offline") and hf_model and HuggingFacePipeline is not None:
+        try:
+            from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+            import torch
+            
+            print(f"Загрузка локальной модели HuggingFace: {hf_model}...")
+            tokenizer = AutoTokenizer.from_pretrained(hf_model)
+            model = AutoModelForCausalLM.from_pretrained(
+                hf_model,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+            )
+            
+            pipe = pipeline(
+                "text-generation",
+                model=model,
+                tokenizer=tokenizer,
+                max_new_tokens=512,
+                temperature=0,
+                do_sample=False,
+            )
+            
+            llm = HuggingFacePipeline(pipeline=pipe)
+            model_used = f"HuggingFace ({hf_model})"
+            print(f"✓ Используется локальная HuggingFace модель: {hf_model}")
+            if model_mode == "auto":
+                _llm_cache = llm
+                _model_info_cache = model_used
+            return llm, model_used
+        except Exception as e:
+            print(f"Локальная HuggingFace модель недоступна: {e}")
+    
+    # 3. Fallback на OpenAI/Timeweb (онлайн)
+    api_key = os.getenv("timeweb_api")
+    if model_mode in ("auto", "online") and api_key:
+        try:
+            llm = ChatOpenAI(
+                base_url=os.getenv("timeweb_openai_url"),
+                api_key=api_key,
+                model=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
+                temperature=0
+            )
+            model_used = "OpenAI/Timeweb API"
+            print("✓ Используется OpenAI/Timeweb API (онлайн)")
+            if model_mode == "auto":
+                _llm_cache = llm
+                _model_info_cache = model_used
+            return llm, model_used
+        except Exception as e:
+            print(f"OpenAI/Timeweb недоступен: {e}")
+    
+    # 4. Если ничего не доступно, возвращаем None
+    if model_mode == "offline":
+        print("⚠ Предупреждение: оффлайн модели недоступны.")
+    elif model_mode == "online":
+        print("⚠ Предупреждение: онлайн API недоступен.")
+    else:
+        print("⚠ Предупреждение: ни одна LLM модель не доступна. Будет использован простой ответ на основе контекста.")
+    
+    if model_mode == "auto":
+        _llm_cache = False  # Кэшируем False, чтобы не пытаться снова
+        _model_info_cache = None
+    return None, None
 
 
 def allowed_file(filename: str) -> bool:
@@ -128,10 +264,84 @@ def create_app() -> Flask:
 
     @app.post("/api/chat")
     def api_chat():
-        data = request.get_json(silent=True) or {}
-        question = (data.get("message") or "").strip()
-        if not question:
+        # Поддержка как JSON, так и FormData (для загрузки файлов)
+        uploaded_files = []
+        question = ""
+        model_mode = "auto"
+        
+        # Проверяем тип запроса: FormData или JSON
+        # FormData запросы имеют request.form, даже если файлов нет
+        if request.form:
+            # Это FormData запрос
+            question = (request.form.get("message") or "").strip()
+            model_mode = request.form.get("model_mode", "auto")
+            
+            # Обрабатываем загруженные файлы (если есть)
+            if request.files:
+                files = request.files.getlist("files")
+                for file in files:
+                    if file.filename == "":
+                        continue
+                    if not allowed_file(file.filename):
+                        continue
+                    
+                    # Сохраняем файл временно
+                    original_filename = file.filename
+                    filename = safe_filename(original_filename)
+                    save_path = os.path.join(UPLOAD_DIR, filename)
+                    file.save(save_path)
+                    
+                    try:
+                        # Обрабатываем файл и добавляем в базу знаний
+                        ext = filename.rsplit(".", 1)[1].lower()
+                        documents: list[Document] = []
+                        
+                        if ext == "pdf":
+                            from langchain_community.document_loaders import PyPDFLoader
+                            loader = PyPDFLoader(save_path)
+                            documents = loader.load()
+                        elif ext == "txt":
+                            text = open(save_path, "r", encoding="utf-8", errors="ignore").read()
+                            documents = [create_document(text)]
+                        
+                        # Используем оригинальное имя файла как doc_id
+                        logical_doc_id = original_filename
+                        update_knowledge_base(documents, doc_id=logical_doc_id)
+                        uploaded_files.append(original_filename)
+                        
+                        # Удаляем временный файл после успешной обработки
+                        try:
+                            if os.path.exists(save_path):
+                                os.remove(save_path)
+                        except Exception as cleanup_error:
+                            print(f"Предупреждение: не удалось удалить файл {save_path}: {cleanup_error}")
+                            
+                    except Exception as e:
+                        print(f"Ошибка при обработке файла {original_filename}: {e}")
+                        # Продолжаем обработку других файлов даже при ошибке
+        
+        else:
+            # Обычный JSON запрос
+            data = request.get_json(silent=True) or {}
+            question = (data.get("message") or "").strip()
+            model_mode = data.get("model_mode", "auto")
+        
+        # Если нет вопроса и нет загруженных файлов
+        if not question and not uploaded_files:
             return jsonify({"ok": False, "error": "Пустой запрос"}), 400
+        
+        # Если загружены только файлы без вопроса, возвращаем успешный ответ
+        if uploaded_files and not question:
+            return jsonify({
+                "ok": True,
+                "answer": f"Файлы успешно загружены и добавлены в базу знаний. Теперь вы можете задать вопросы на основе их содержимого.",
+                "uploaded_files": uploaded_files,
+                "snippets": []
+            })
+        
+        # Валидация режима модели
+        if model_mode not in ("auto", "offline", "online"):
+            model_mode = "auto"
 
         store = load_vectorstore()
         if store is None:
@@ -186,43 +396,53 @@ def create_app() -> Flask:
                 "error": "В базе знаний не найдено релевантной информации для вашего запроса. Попробуйте переформулировать вопрос или загрузите соответствующие документы."
             }), 400
         
-        # Use OpenAI if configured; otherwise, return heuristic answer
-        api_key = os.getenv("timeweb_api")
-        if api_key:
+        # Получаем LLM с учетом выбранного режима
+        llm, model_used = get_llm(model_mode)
+        
+        system_prompt = (
+            "Вы — помощник на борту космического корабля. "
+            "Отвечайте кратко и по делу, используя ТОЛЬКО информацию из предоставленного контекста.\n\n"
+            "ВАЖНО:\n"
+            "- Если контекст не содержит информации, относящейся к вопросу, "
+            "честно скажите: 'В предоставленном контексте нет информации по этому вопросу.'\n"
+            "- Если контекст содержит информацию, но она не полностью отвечает на вопрос, "
+            "укажите это и ответьте на основе того, что есть.\n"
+            "- НЕ придумывайте информацию, которой нет в контексте.\n\n"
+            f"Контекст из базы знаний:\n{context}"
+        )
+        
+        if llm:
             try:
-                llm = ChatOpenAI(
-                    base_url=os.getenv("timeweb_openai_url"),
-                    api_key=api_key,
-                    model=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
-                    temperature=0
-                )
                 messages = [
-                    SystemMessage(
-                        content=(
-                            "Вы — помощник на борту космического корабля. "
-                            "Отвечайте кратко и по делу, используя ТОЛЬКО информацию из предоставленного контекста.\n\n"
-                            "ВАЖНО:\n"
-                            "- Если контекст не содержит информации, относящейся к вопросу, "
-                            "честно скажите: 'В предоставленном контексте нет информации по этому вопросу.'\n"
-                            "- Если контекст содержит информацию, но она не полностью отвечает на вопрос, "
-                            "укажите это и ответьте на основе того, что есть.\n"
-                            "- НЕ придумывайте информацию, которой нет в контексте.\n\n"
-                            f"Контекст из базы знаний:\n{context}"
-                        )
-                    ),
+                    SystemMessage(content=system_prompt),
                     HumanMessage(content=question),
                 ]
                 answer = llm.invoke(messages).content
             except Exception as e:
+                print(f"Ошибка при генерации ответа LLM: {e}")
                 answer = (
-                    "LLM недоступен (" + str(e) + "). "
-                    "Ниже приведены наиболее релевантные фрагменты из базы знаний.\n\n" + context[:1500]
+                    f"Ошибка при генерации ответа ({str(e)}). "
+                    "Ниже приведены наиболее релевантные фрагменты из базы знаний:\n\n" + context[:1500]
                 )
+                model_used = None  # Сбрасываем, так как произошла ошибка
         else:
-            answer = (
-                "LLM не настроен (нет переменной timeweb_api). "
-                "Вот релевантный контекст из базы знаний:\n\n" + context[:1500]
-            )
+            # Fallback: простой ответ на основе контекста
+            if model_mode == "offline":
+                answer = (
+                    "Оффлайн модели недоступны. "
+                    "Вот релевантный контекст из базы знаний по вашему запросу:\n\n" + context[:1500]
+                )
+            elif model_mode == "online":
+                answer = (
+                    "Онлайн API недоступен. "
+                    "Вот релевантный контекст из базы знаний по вашему запросу:\n\n" + context[:1500]
+                )
+            else:
+                answer = (
+                    "LLM модель не настроена или недоступна. "
+                    "Вот релевантный контекст из базы знаний по вашему запросу:\n\n" + context[:1500]
+                )
+            model_used = None
 
         snippets = [
             {
@@ -232,7 +452,13 @@ def create_app() -> Flask:
             for d in docs
         ]
 
-        return jsonify({"ok": True, "answer": answer, "snippets": snippets})
+        response_data = {"ok": True, "answer": answer, "snippets": snippets}
+        if model_used:
+            response_data["model_used"] = model_used
+        if uploaded_files:
+            response_data["uploaded_files"] = uploaded_files
+        
+        return jsonify(response_data)
 
     # Static convenience for uploaded files (only available if upload failed)
     # Note: files are deleted after successful ingestion into knowledge base

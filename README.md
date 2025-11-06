@@ -78,4 +78,56 @@ x-folder-id: <YANDEX_FOLDER_ID>
 
 Refer to Yandex Cloud AI Studio docs: https://yandex.cloud/en/docs/ai-studio/concepts/api
 
+## Оффлайн режим (Offline Mode)
+
+Приложение поддерживает полностью оффлайн работу через локальные LLM модели. Приоритет выбора модели:
+
+1. **Ollama** (рекомендуется) - простой и быстрый способ
+2. **HuggingFace локальные модели** - для более продвинутых сценариев
+3. **OpenAI/Timeweb API** - онлайн fallback
+
+### Настройка Ollama (рекомендуется)
+
+1. Установите Ollama: https://ollama.ai/
+
+2. Скачайте модель (например, gemma3:4b):
+```bash
+ollama pull gemma3:4b
+```
+
+3. Убедитесь, что Ollama запущен (по умолчанию на http://localhost:11434)
+
+4. В файле `api_key.env` добавьте (опционально, для кастомизации):
+```env
+OLLAMA_MODEL=gemma3:4b
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+Приложение автоматически обнаружит и использует Ollama, если он доступен.
+
+### Настройка локальной HuggingFace модели
+
+1. В файле `api_key.env` укажите модель:
+```env
+HF_MODEL=microsoft/DialoGPT-medium
+```
+
+2. При первом запуске модель будет автоматически загружена с HuggingFace Hub.
+
+**Примечание:** Локальные модели HuggingFace требуют значительных ресурсов (RAM/VRAM) и могут быть медленными на CPU.
+
+### Веб-интерфейс
+
+Запустите приложение:
+```bash
+python app.py
+```
+
+Откройте в браузере:
+- `http://localhost:8000/` - главная страница
+- `http://localhost:8000/upload` - загрузка документов
+- `http://localhost:8000/chat` - чат с ассистентом
+
+Приложение автоматически выберет доступную LLM модель (оффлайн или онлайн) для генерации ответов.
+
 

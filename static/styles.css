@@ -52,8 +52,54 @@ html, body {
 
 .chat { display: grid; gap: 10px; height: calc(100vh - 210px); }
 .chat-log { overflow: auto; background: #fff; border: 1px solid #e2e6d5; border-radius: 12px; padding: 12px; }
-.chat-input { display: flex; gap: 10px; }
-.chat-input input { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid #cfd6c0; }
+.chat-input { display: flex; flex-direction: column; gap: 8px; }
+.chat-input-row { display: flex; gap: 10px; align-items: center; }
+.chat-input input[type="text"] { flex: 1; min-width: 200px; padding: 10px; border-radius: 10px; border: 1px solid #cfd6c0; }
+.btn-file { background: var(--lavender); cursor: pointer; font-size: 18px; padding: 10px 14px; }
+.btn-file:hover { filter: brightness(1.1); }
+.file-list { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.file-item { display: flex; align-items: center; gap: 6px; background: #f0f4e8; padding: 4px 8px; border-radius: 6px; font-size: 12px; color: var(--dark); }
+.file-item .file-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item .file-remove { cursor: pointer; color: #d32f2f; font-weight: bold; padding: 0 4px; }
+.file-item .file-remove:hover { color: #b71c1c; }
+.info-message { background: #e3f2fd; border-left: 4px solid var(--teal); padding: 10px 12px; border-radius: 8px; margin: 6px 0; color: var(--dark); font-size: 14px; }
+
+.model-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: white;
+  border: 1px solid #e2e6d5;
+  border-radius: 10px;
+  margin-bottom: 10px;
+}
+.model-selector label {
+  font-weight: 500;
+  color: var(--dark);
+}
+.model-select {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #cfd6c0;
+  background: white;
+  color: var(--dark);
+  font-size: 14px;
+  cursor: pointer;
+}
+.model-select:hover {
+  border-color: var(--teal);
+}
+.model-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: #666;
+  font-style: italic;
+}
+.model-status.active {
+  color: var(--teal);
+  font-weight: 500;
+}
 
 .bubble { padding: 10px 12px; border-radius: 12px; margin: 6px 0; max-width: 80ch; }
 .bubble.user { background: var(--teal); color: #fff; margin-left: auto; }

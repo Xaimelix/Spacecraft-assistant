@@ -1,10 +1,26 @@
 {% extends 'base.html' %}
 {% block content %}
 <div class="chat">
+  <div class="model-selector">
+    <label for="model-mode">Режим модели:</label>
+    <select id="model-mode" class="model-select">
+      <option value="auto">Автоматически</option>
+      <option value="offline">Оффлайн (Ollama/HuggingFace)</option>
+      <option value="online">Онлайн (OpenAI/Timeweb)</option>
+    </select>
+    <span id="model-status" class="model-status"></span>
+  </div>
   <div id="chat-log" class="chat-log"></div>
-  <form id="chat-form" class="chat-input">
-    <input id="chat-message" type="text" placeholder="Задайте вопрос..." required />
-    <button class="btn btn-primary" type="submit">Отправить</button>
+  <form id="chat-form" class="chat-input" enctype="multipart/form-data">
+    <div id="file-list" class="file-list"></div>
+    <div class="chat-input-row">
+      <input id="chat-file" type="file" accept=".pdf,.txt" multiple style="display: none;" />
+      <label for="chat-file" class="btn btn-file" title="Загрузить PDF или TXT файлы">
+        📎
+      </label>
+      <input id="chat-message" type="text" placeholder="Задайте вопрос или загрузите файлы..." />
+      <button class="btn btn-primary" type="submit">Отправить</button>
+    </div>
   </form>
 </div>
 {% endblock %}
