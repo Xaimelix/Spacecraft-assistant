@@ -1,5 +1,8 @@
 import json
 import os
+from functools import lru_cache
+from threading import RLock
+from time import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from langchain_core.documents import Document
@@ -12,12 +15,29 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 PERSIST_DIR = os.path.join("rag_store", "faiss_index")
 ID_MAP_FILENAME = "ids.json"  # карта соответствия doc_id -> список внутренних chunk_ids
 
+# Внутренние кэши, чтобы избежать повторной загрузки инициализации тяжёлых объектов
+_VECTORSTORE_CACHE: Dict[str, FAISS] = {}
+_VECTORSTORE_SIGNATURES: Dict[str, float] = {}
+_VECTORSTORE_LOCK = RLock()
+
+
+@lru_cache(maxsize=4)
+def _build_embeddings(kind: str) -> object:
+    """Отдельная фабрика, кэшированная по типу/настройкам."""
+    if kind == "openai":
+        return OpenAIEmbeddings(model="text-embedding-3-small")
+
+    # Формат: hf::<model_name>
+    _, model_name = kind.split("::", 1)
+    return HuggingFaceEmbeddings(model_name=model_name)
+
 
 def _get_embeddings_model():
     provider = os.getenv("EMBEDDINGS_PROVIDER", "hf").lower()
+    hf_model = os.getenv("HF_EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     if provider == "openai" and os.getenv("OPENAI_API_KEY"):
-        return OpenAIEmbeddings(model="text-embedding-3-small")
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        return _build_embeddings("openai")
+    return _build_embeddings(f"hf::{hf_model}")
 
 
 def get_text_splitter(
@@ -52,19 +72,54 @@ def _save_id_map(id_map: Dict[str, List[str]], persist_dir: Optional[str] = None
         json.dump(id_map, f, ensure_ascii=False, indent=2)
 
 
+def _index_signature(base_dir: str) -> float:
+    """Возвращает подпись (максимальный mtime) для файлов индекса."""
+    try:
+        mtimes = []
+        for fname in os.listdir(base_dir):
+            path = os.path.join(base_dir, fname)
+            if os.path.isfile(path):
+                mtimes.append(os.path.getmtime(path))
+        return max(mtimes) if mtimes else 0.0
+    except FileNotFoundError:
+        return 0.0
+
+
 def load_vectorstore(persist_dir: Optional[str] = None) -> Optional[FAISS]:
     base_dir, _ = _persist_paths(persist_dir)
+    cache_key = os.path.abspath(base_dir)
+    signature = _index_signature(base_dir)
+
+    with _VECTORSTORE_LOCK:
+        cached = _VECTORSTORE_CACHE.get(cache_key)
+        cached_sig = _VECTORSTORE_SIGNATURES.get(cache_key, 0.0)
+        if cached and cached_sig >= signature:
+            return cached
+
     try:
-        return FAISS.load_local(
+        store = FAISS.load_local(
             base_dir, _get_embeddings_model(), allow_dangerous_deserialization=True
         )
     except Exception:
+        with _VECTORSTORE_LOCK:
+            _VECTORSTORE_CACHE.pop(cache_key, None)
+            _VECTORSTORE_SIGNATURES.pop(cache_key, None)
         return None
+
+    with _VECTORSTORE_LOCK:
+        _VECTORSTORE_CACHE[cache_key] = store
+        _VECTORSTORE_SIGNATURES[cache_key] = signature or time()
+
+    return store
 
 
 def save_vectorstore(store: FAISS, persist_dir: Optional[str] = None) -> None:
     base_dir, _ = _persist_paths(persist_dir)
     store.save_local(base_dir)
+    cache_key = os.path.abspath(base_dir)
+    with _VECTORSTORE_LOCK:
+        _VECTORSTORE_CACHE[cache_key] = store
+        _VECTORSTORE_SIGNATURES[cache_key] = _index_signature(base_dir) or time()
 
 
 def create_document(content: str, metadata: Optional[Dict] = None) -> Document:
