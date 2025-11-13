@@ -60,7 +60,16 @@ html, body {
 .file-list { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
 .file-item { display: flex; align-items: center; gap: 6px; background: #f0f4e8; padding: 4px 8px; border-radius: 6px; font-size: 12px; color: var(--dark); }
 .file-item .file-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-item .file-remove { cursor: pointer; color: #d32f2f; font-weight: bold; padding: 0 4px; }
+.file-item .file-remove {
+  cursor: pointer;
+  color: #d32f2f;
+  font-weight: bold;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  line-height: 1;
+  appearance: none;
+}
 .file-item .file-remove:hover { color: #b71c1c; }
 .info-message { background: #e3f2fd; border-left: 4px solid var(--teal); padding: 10px 12px; border-radius: 8px; margin: 6px 0; color: var(--dark); font-size: 14px; }
 
