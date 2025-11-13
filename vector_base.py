@@ -5,6 +5,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -17,7 +18,7 @@ def _get_embeddings_model():
     provider = os.getenv("EMBEDDINGS_PROVIDER", "hf").lower()
     if provider == "openai" and os.getenv("OPENAI_API_KEY"):
         return OpenAIEmbeddings(model="text-embedding-3-small")
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return HuggingFaceEmbeddings(model="sentence-transformers/all-MiniLM-L6-v2")
 
 
 def get_text_splitter(
