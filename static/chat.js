@@ -23,6 +23,7 @@ export default function initChat() {
     const fileList = document.getElementById('file-list');
     const modelMode = document.getElementById('model-mode');
     const modelStatus = document.getElementById('model-status');
+    const resetMemoryBtn = document.getElementById('reset-memory');
 
     if (!chatForm || !chatLog || !chatMessage) {
       return;
@@ -30,6 +31,17 @@ export default function initChat() {
 
     const state = {
       files: [],
+    };
+
+    const formatStatusText = (payload) => {
+      const parts = [];
+      if (payload && payload.model_used) {
+        parts.push(`Используется: ${payload.model_used}`);
+      }
+      if (payload && typeof payload.memory_turns === 'number' && payload.memory_turns > 0) {
+        parts.push(`Память: ${payload.memory_turns} ходов`);
+      }
+      return parts.join(' · ');
     };
 
     const scrollToBottom = () => {
@@ -172,6 +184,7 @@ export default function initChat() {
         const response = await fetch('/api/chat', {
           method: 'POST',
           body: createFormData(message, state.files, mode),
+          credentials: 'same-origin',
         });
 
         const payload = await response.json();
@@ -182,11 +195,7 @@ export default function initChat() {
 
         pendingBubble.textContent = payload.ok ? payload.answer : payload.error || 'Ошибка';
 
-        if (payload.model_used) {
-          updateModelStatus(`Используется: ${payload.model_used}`);
-        } else {
-          updateModelStatus('');
-        }
+        updateModelStatus(formatStatusText(payload));
 
         if (Array.isArray(payload.snippets) && payload.snippets.length) {
           const fragment = document.createDocumentFragment();
@@ -209,5 +218,31 @@ export default function initChat() {
         updateModelStatus('');
       }
     });
-  });
+
+    if (resetMemoryBtn) {
+      resetMemoryBtn.addEventListener('click', async () => {
+        const originalText = resetMemoryBtn.textContent;
+        resetMemoryBtn.disabled = true;
+        resetMemoryBtn.textContent = '…';
+        try {
+          const response = await fetch('/api/chat/reset', {
+            method: 'POST',
+            credentials: 'same-origin',
+          });
+          const payload = await response.json();
+          if (payload.ok) {
+            appendInfo(payload.message || 'Память очищена.');
+            updateModelStatus(formatStatusText(payload));
+          } else {
+            appendInfo(payload.error || 'Не удалось очистить память.');
+          }
+        } catch (error) {
+          appendInfo(`Ошибка очистки памяти: ${String(error)}`);
+        } finally {
+          resetMemoryBtn.disabled = false;
+          resetMemoryBtn.textContent = originalText;
+        }
+      });
+    }
+    });
 }
