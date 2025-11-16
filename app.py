@@ -1,14 +1,14 @@
 import os
 import re
 import uuid
+from collections import deque
 from datetime import datetime
-from typing import Optional
 
-from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
+from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for, session
 
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 # Опциональные импорты для оффлайн LLM
 try:
@@ -32,7 +32,11 @@ from dotenv import load_dotenv
 
 UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
 ALLOWED_EXTENSIONS = {"pdf", "txt"}
-load_dotenv("api_key.env")
+load_dotenv("config.env")
+
+MAX_MEMORY_TURNS = int(os.getenv("MEMORY_MAX_TURNS", "6"))
+MAX_MEMORY_USER_CONTEXT = int(os.getenv("MEMORY_USER_CONTEXT", "3"))
+_conversation_memory: dict[str, deque] = {}
 
 
 # Кэш для LLM модели (чтобы не пересоздавать каждый раз)
@@ -62,7 +66,8 @@ def get_llm(model_mode: str = "auto"):
             # Если в кэше есть модель, возвращаем её с информацией о модели
             return _llm_cache, _model_info_cache or "Кэшированная модель"
         if _llm_cache is False:
-            return None, None
+            # Ранее не удалось подобрать модель — пробуем снова (не выходим сразу)
+            print("ℹ Пропуск кэша отказа: повторная попытка подбора LLM в режиме auto")
     
     model_used = None  # Для отслеживания какой модели используется
     
@@ -70,7 +75,6 @@ def get_llm(model_mode: str = "auto"):
     if model_mode in ("auto", "offline") and ChatOllama is not None:
         ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
         ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        
         try:
             llm = ChatOllama(
                 model=ollama_model,
@@ -87,8 +91,8 @@ def get_llm(model_mode: str = "auto"):
                         _llm_cache = llm
                         _model_info_cache = model_used
                     return llm, model_used
-            except Exception:
-                pass  # Ollama не отвечает, пробуем дальше
+            except Exception as probe_error:
+                print(f"Проверка Ollama не удалась, продолжаем подбор: {probe_error}")
         except Exception as e:
             print(f"Ollama недоступен: {e}")
     
@@ -155,7 +159,8 @@ def get_llm(model_mode: str = "auto"):
         print("⚠ Предупреждение: ни одна LLM модель не доступна. Будет использован простой ответ на основе контекста.")
     
     if model_mode == "auto":
-        _llm_cache = False  # Кэшируем False, чтобы не пытаться снова
+        # Не кэшируем отказ навсегда: оставляем возможность повторных попыток
+        _llm_cache = None
         _model_info_cache = None
     return None, None
 
@@ -192,8 +197,66 @@ def safe_filename(filename: str) -> str:
     return name + ext
 
 
+def _ensure_session_id() -> str:
+    """Возвращает идентификатор сессии пользователя и создает его при необходимости."""
+    sid = session.get("session_id")
+    if not sid:
+        sid = session["session_id"] = uuid.uuid4().hex
+    return sid
+
+
+def _get_history(session_id: str) -> deque | None:
+    return _conversation_memory.get(session_id)
+
+
+def _append_history(session_id: str, role: str, content: str) -> None:
+    if not content:
+        return
+    history = _conversation_memory.get(session_id)
+    if history is None:
+        history = deque(maxlen=MAX_MEMORY_TURNS * 2)
+        _conversation_memory[session_id] = history
+    history.append({"role": role, "content": content})
+
+
+def _history_to_messages(history: deque | None) -> list:
+    if not history:
+        return []
+    messages = []
+    for item in history:
+        role = item.get("role")
+        content = item.get("content") or ""
+        if not content:
+            continue
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            messages.append(AIMessage(content=content))
+    return messages
+
+
+def _augment_query_with_memory(question: str, history: deque | None) -> str:
+    if not history:
+        return question
+    recent_user_messages = [
+        item.get("content") or ""
+        for item in history
+        if item.get("role") == "user" and item.get("content")
+    ]
+    if not recent_user_messages or MAX_MEMORY_USER_CONTEXT <= 0:
+        return question
+    tail = recent_user_messages[-MAX_MEMORY_USER_CONTEXT:]
+    memory_context = "\n".join(tail)
+    return f"{question}\n\nПредыдущие вопросы пользователя:\n{memory_context}"
+
+
+def _reset_history(session_id: str) -> None:
+    _conversation_memory.pop(session_id, None)
+
+
 def create_app() -> Flask:
     app = Flask(__name__, static_folder="static", template_folder="templates")
+    app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dev-secret")
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
     @app.get("/healthz")
@@ -261,6 +324,18 @@ def create_app() -> Flask:
     @app.get("/chat")
     def chat_page():
         return render_template("chat.html")
+    
+    @app.post("/api/chat/reset")
+    def reset_chat():
+        session_id = _ensure_session_id()
+        had_history = bool(_get_history(session_id))
+        _reset_history(session_id)
+        message = (
+            "Память диалога очищена."
+            if had_history
+            else "Память уже пуста. Можно продолжать чат."
+        )
+        return jsonify({"ok": True, "message": message, "memory_turns": 0})
 
     @app.post("/api/chat")
     def api_chat():
@@ -268,6 +343,8 @@ def create_app() -> Flask:
         uploaded_files = []
         question = ""
         model_mode = "auto"
+        session_id = _ensure_session_id()
+        history = _get_history(session_id)
         
         # Проверяем тип запроса: FormData или JSON
         # FormData запросы имеют request.form, даже если файлов нет
@@ -355,7 +432,8 @@ def create_app() -> Flask:
         # FAISS использует L2 расстояние, где меньше = лучше (0 = идентично)
         # Получаем больше кандидатов, затем фильтруем по порогу
         max_candidates = 10
-        docs_with_scores = store.similarity_search_with_score(question, k=max_candidates)
+        query_for_retrieval = _augment_query_with_memory(question, history)
+        docs_with_scores = store.similarity_search_with_score(query_for_retrieval, k=max_candidates)
         
         # Порог релевантности: максимальное допустимое расстояние
         # Для L2 расстояния в FAISS: обычно < 1.0 для хороших совпадений
@@ -411,12 +489,16 @@ def create_app() -> Flask:
             f"Контекст из базы знаний:\n{context}"
         )
         
+        memory_messages = _history_to_messages(history)
+
         if llm:
             try:
-                messages = [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=question),
-                ]
+                messages = [SystemMessage(content=system_prompt)]
+                print('memory_messages', memory_messages)
+                if memory_messages:
+                    messages.extend(memory_messages)
+                messages.append(HumanMessage(content=question))
+                print('messages', messages)
                 answer = llm.invoke(messages).content
             except Exception as e:
                 print(f"Ошибка при генерации ответа LLM: {e}")
@@ -452,7 +534,19 @@ def create_app() -> Flask:
             for d in docs
         ]
 
-        response_data = {"ok": True, "answer": answer, "snippets": snippets}
+        if question:
+            _append_history(session_id, "user", question)
+            _append_history(session_id, "assistant", answer)
+        
+        current_history = _get_history(session_id)
+        memory_turns = (len(current_history) // 2) if current_history else 0
+        
+        response_data = {
+            "ok": True,
+            "answer": answer,
+            "snippets": snippets,
+            "memory_turns": memory_turns,
+        }
         if model_used:
             response_data["model_used"] = model_used
         if uploaded_files:
