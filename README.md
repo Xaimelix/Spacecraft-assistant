@@ -1,133 +1,124 @@
-## Spacecraft Assistant — RAG with YandexGPT
+## Spacecraft Assistant — локальный RAG-ассистент с веб‑интерфейсом
 
-This project implements a basic RAG pipeline using a hybrid retriever (FAISS vector search + BM25 keyword search) and YandexGPT for answer generation.
+Интерактивный помощник для корабельных операторов с поиском по базе знаний (RAG) и чат‑интерфейсом. Поддерживаются оффлайн‑модели (Ollama, локальные HuggingFace) и онлайн‑модели (OpenAI/Timeweb). Документы (`.pdf`, `.txt`) загружаются через веб‑UI и индексируются в локальном FAISS.
 
-### Setup
+### Возможности
 
-1) Python 3.10+ is recommended. Create and activate a virtual environment.
+- Веб‑интерфейс: загрузка документов и чат (`Flask`, страницы `index`, `upload`, `chat`)
+- Локальное хранение знаний: `FAISS` + `HuggingFace/OpenAI embeddings`
+- Интеллектуальный выбор LLM: `auto | offline | online`
+- Безопасные имена файлов с сохранением кириллицы, временные файлы удаляются после индексации
+- Логирование и аудит в `logs/app.log` и `logs/audit.log`
 
-```bash
+### Быстрый старт (Windows PowerShell)
+
+```powershell
 python -m venv venv
-venv\Scripts\activate  # Windows PowerShell
-```
-
-2) Install dependencies:
-
-```bash
+venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
 
-3) Place your source documents. By default, the project ingests `ИИ в космосе.pdf` in the project root.
-
-4) Set environment variables for YandexGPT:
-
-```bash
-$env:YANDEX_API_KEY="<your-api-key>"
-$env:YANDEX_FOLDER_ID="<your-folder-id>"
-```
-
-Optional: Choose embeddings provider (default is HuggingFace). To use OpenAI embeddings instead:
-
-```bash
-$env:EMBEDDINGS_PROVIDER="openai"
-$env:OPENAI_API_KEY="<your-openai-key>"
-```
-
-### Ingest
-
-Build the FAISS index and persist chunked docs with metadata:
-
-```bash
-python ingest.py
-```
-
-Artifacts will be saved under `rag_store/`.
-
-### Ask Questions (RAG)
-
-```bash
-python rag_yandex.py "Какова процедура аварийного отключения системы?" --k 5 --filter "system=life_support,priority=critical"
-```
-
-Notes:
-- Retrieval uses an ensemble of FAISS (70%) and BM25 (30%).
-- Metadata filtering is applied to the vector retriever; BM25 searches full corpus.
-- Answer generation calls YandexGPT via the Foundation Models API (`completion` endpoint).
-
-### Files
-
-- `ingest.py`: Loads PDF, chunks text, adds metadata, builds FAISS, saves chunks.
-- `rag_yandex.py`: Hybrid retrieval + YandexGPT completion, simple CLI.
-- `requirements.txt`: Dependencies.
-- `vector_base.py`: Legacy file; new pipeline does not depend on it.
-
-### YandexGPT API
-
-The integration uses Yandex Cloud Foundation Models Completion API with `modelUri`:
-
-```
-gpt://<FOLDER_ID>/yandexgpt/latest
-```
-
-Headers:
-
-```
-Authorization: Api-Key <YANDEX_API_KEY>
-x-folder-id: <YANDEX_FOLDER_ID>
-```
-
-Refer to Yandex Cloud AI Studio docs: https://yandex.cloud/en/docs/ai-studio/concepts/api
-
-## Оффлайн режим (Offline Mode)
-
-Приложение поддерживает полностью оффлайн работу через локальные LLM модели. Приоритет выбора модели:
-
-1. **Ollama** (рекомендуется) - простой и быстрый способ
-2. **HuggingFace локальные модели** - для более продвинутых сценариев
-3. **OpenAI/Timeweb API** - онлайн fallback
-
-### Настройка Ollama (рекомендуется)
-
-1. Установите Ollama: https://ollama.ai/
-
-2. Скачайте модель (например, gemma3:4b):
-```bash
-ollama pull gemma3:4b
-```
-
-3. Убедитесь, что Ollama запущен (по умолчанию на http://localhost:11434)
-
-4. В файле `api_key.env` добавьте (опционально, для кастомизации):
-```env
-OLLAMA_MODEL=gemma3:4b
-OLLAMA_BASE_URL=http://localhost:11434
-```
-
-Приложение автоматически обнаружит и использует Ollama, если он доступен.
-
-### Настройка локальной HuggingFace модели
-
-1. В файле `api_key.env` укажите модель:
-```env
-HF_MODEL=microsoft/DialoGPT-medium
-```
-
-2. При первом запуске модель будет автоматически загружена с HuggingFace Hub.
-
-**Примечание:** Локальные модели HuggingFace требуют значительных ресурсов (RAM/VRAM) и могут быть медленными на CPU.
-
-### Веб-интерфейс
-
-Запустите приложение:
-```bash
+# Скопируйте и отредактируйте переменные в config.env (см. раздел Конфигурация)
+# Запуск приложения
 python app.py
 ```
 
 Откройте в браузере:
-- `http://localhost:8000/` - главная страница
-- `http://localhost:8000/upload` - загрузка документов
-- `http://localhost:8000/chat` - чат с ассистентом
+- `http://localhost:8000/` — главная
+- `http://localhost:8000/upload` — загрузка документов
+- `http://localhost:8000/chat` — чат с ассистентом
 
-Приложение автоматически выберет доступную LLM модель (оффлайн или онлайн) для генерации ответов.
+### Конфигурация (config.env)
 
+По умолчанию приложение читает переменные из `config.env` (загружается через `python-dotenv`):
 
+```env
+# Онлайн LLM (Timeweb/OpenAI-совместимый endpoint)
+timeweb_api=...
+timeweb_access_id=...
+timeweb_openai_url=https://agent.timeweb.cloud/api/v1/cloud-ai/agents/<id>/v1
+OPENAI_MODEL=gpt-5-nano
+
+# Оффлайн LLM
+OLLAMA_MODEL=gemma3:1b          # либо ваша модель Ollama (напр.llama3.2)
+# OLLAMA_BASE_URL=http://localhost:11434
+HF_MODEL=                         # локальная HF модель (опционально)
+
+# Embeddings
+EMBEDDINGS_PROVIDER=hf           # hf | openai
+HF_EMBEDDINGS_MODEL=intfloat/e5-base-v2
+
+# Прочее
+PORT=8000
+LOG_DIR=logs
+LOG_LEVEL=INFO
+RELEVANCE_THRESHOLD=1.5          # порог релевантности для FAISS (меньше — лучше)
+```
+
+> Внимание: не коммитьте реальные ключи в репозиторий. Храните `config.env` локально.
+
+### Режимы моделей
+
+- `auto` — сначала пытается Ollama, затем локальную HuggingFace, дальше онлайн API
+- `offline` — использует только Ollama/HuggingFace
+- `online` — использует только Timeweb/OpenAI‑совместимый API
+
+Режим задаётся параметром `model_mode` в `/api/chat` (или через UI).
+
+### Как это работает
+
+1) Загрузка документов (`.pdf`, `.txt`) на странице `/upload` или вместе с сообщением в `/chat`  
+2) Разбиение текста на чанки и индексирование в `FAISS` с эмбеддингами (`HF` по умолчанию)  
+3) По вопросу пользователя извлекаются релевантные чанки (similarity + порог `RELEVANCE_THRESHOLD`)  
+4) LLM генерирует ответ строго по контексту; при отсутствии релевантных данных возвращается понятная ошибка/сообщение
+
+Векторное хранилище и служебные файлы: `rag_store/faiss_index/` (включая `ids.json` для сопоставления `doc_id -> chunk_ids`).
+
+### API (кратко)
+
+- `GET /healthz` — проверка состояния
+- `GET /` — главная
+- `GET /upload` — форма загрузки
+- `POST /api/upload` — загрузка файла (`pdf`/`txt`), индексация, удаление временного файла
+- `GET /chat` — чат‑страница
+- `POST /api/chat` — сообщение + (опциональные) файлы, режим модели `auto|offline|online`
+
+Ответ `/api/chat` включает текст ответа, список использованных фрагментов и, при наличии, `model_used`.
+
+### Работа оффлайн
+
+1) Установите Ollama: `https://ollama.ai/`, запустите по умолчанию на `http://localhost:11434`  
+2) Загрузите модель, например:  
+```powershell
+ollama pull gemma3:1b
+```
+3) Убедитесь, что `OLLAMA_MODEL` задан в `config.env` (или используйте `HF_MODEL` для локальной HuggingFace)
+
+### Полезные скрипты и файлы
+
+- `app.py` — веб‑приложение (Flask, UI + API)
+- `vector_base.py` — работа с FAISS/эмбеддингами, обновление/перестройка индекса
+- `ingest.py` — пример оффлайн‑индексации из файлов (опционально)
+- `requirements.txt` — зависимости
+- `templates/`, `static/` — фронтенд
+- `logs/` — логи приложения и аудита
+
+### Требования
+
+- Python 3.10+
+- Windows/macOS/Linux; для оффлайн LLM потребуется достаточный объём RAM/VRAM 
+
+### Частые вопросы
+
+- Ничего не найдено в базе знаний  
+  Проверьте, что вы загрузили документы и порог `RELEVANCE_THRESHOLD` не слишком строгий.
+
+- Ошибка онлайн‑модели (см. logs) 
+  Проверьте `timeweb_api`, `timeweb_openai_url`, `OPENAI_MODEL`. Временно можно работать в режиме `offline`.
+  Проверьте, что ваш env файл называется config.env
+
+- Производительность на CPU (см. logs) 
+  Для локальных HF‑моделей используйте меньшие модели или GPU, либо Ollama‑модель полегче.
+
+---
+
+Если нужен полностью оффлайн режим и воспроизводимая установка — смотрите `OFFLINE_SETUP.md`. Также есть `AGENT_README.md` по функциональности агентов.

@@ -3,6 +3,8 @@ import re
 import uuid
 from datetime import datetime
 from typing import Optional
+import logging
+from logging.handlers import RotatingFileHandler
 
 from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
 
@@ -32,12 +34,62 @@ from dotenv import load_dotenv
 
 UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
 ALLOWED_EXTENSIONS = {"pdf", "txt"}
-load_dotenv("api_key.env")
+load_dotenv("config.env")
 
 
 # Кэш для LLM модели (чтобы не пересоздавать каждый раз)
 _llm_cache = None
 _model_info_cache = None  # Информация о модели в кэше
+
+
+def setup_logging() -> None:
+    """
+    Инициализация логирования приложения и аудита.
+    - Основной лог: logs/app.log
+    - Аудит-лог: logs/audit.log
+    Управляется переменными окружения: LOG_DIR, LOG_LEVEL.
+    """
+    log_dir = os.getenv("LOG_DIR", os.path.join(os.getcwd(), "logs"))
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Уровень логирования
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    # Форматы
+    app_format = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    audit_format = logging.Formatter(
+        "%(asctime)s | %(levelname)s | AUDIT | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Основной файл логов
+    app_log_path = os.path.join(log_dir, "app.log")
+    app_handler = RotatingFileHandler(app_log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    app_handler.setFormatter(app_format)
+    app_handler.setLevel(level)
+
+    # Аудит файл логов
+    audit_log_path = os.path.join(log_dir, "audit.log")
+    audit_handler = RotatingFileHandler(audit_log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    audit_handler.setFormatter(audit_format)
+    audit_handler.setLevel(logging.INFO)
+
+    # Конфигурация корневого логгера (для app и библиотек)
+    root_logger = logging.getLogger()
+    # Избегаем дублирования хендлеров при повторной инициализации
+    if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
+        root_logger.setLevel(level)
+        root_logger.addHandler(app_handler)
+
+    # Отдельный логгер для аудита
+    audit_logger = logging.getLogger("audit")
+    if not any(isinstance(h, RotatingFileHandler) for h in audit_logger.handlers):
+        audit_logger.setLevel(logging.INFO)
+        audit_logger.addHandler(audit_handler)
 
 
 def get_llm(model_mode: str = "auto"):
@@ -66,6 +118,8 @@ def get_llm(model_mode: str = "auto"):
     
     model_used = None  # Для отслеживания какой модели используется
     
+    logger = logging.getLogger(__name__)
+
     # 1. Попытка использовать Ollama (оффлайн, локальный)
     if model_mode in ("auto", "offline") and ChatOllama is not None:
         ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
@@ -82,7 +136,7 @@ def get_llm(model_mode: str = "auto"):
                 test_response = llm.invoke([HumanMessage(content="ok")])
                 if test_response and test_response.content:
                     model_used = f"Ollama ({ollama_model})"
-                    print(f"✓ Используется Ollama модель: {ollama_model}")
+                    logger.info(f"Используется Ollama модель: {ollama_model}")
                     if model_mode == "auto":
                         _llm_cache = llm
                         _model_info_cache = model_used
@@ -90,7 +144,7 @@ def get_llm(model_mode: str = "auto"):
             except Exception:
                 pass  # Ollama не отвечает, пробуем дальше
         except Exception as e:
-            print(f"Ollama недоступен: {e}")
+            logger.warning(f"Ollama недоступен: {e}")
     
     # 2. Попытка использовать локальную HuggingFace модель (оффлайн)
     hf_model = os.getenv("HF_MODEL")
@@ -99,7 +153,7 @@ def get_llm(model_mode: str = "auto"):
             from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
             import torch
             
-            print(f"Загрузка локальной модели HuggingFace: {hf_model}...")
+            logger.info(f"Загрузка локальной модели HuggingFace: {hf_model}...")
             tokenizer = AutoTokenizer.from_pretrained(hf_model)
             model = AutoModelForCausalLM.from_pretrained(
                 hf_model,
@@ -119,13 +173,13 @@ def get_llm(model_mode: str = "auto"):
             
             llm = HuggingFacePipeline(pipeline=pipe)
             model_used = f"HuggingFace ({hf_model})"
-            print(f"✓ Используется локальная HuggingFace модель: {hf_model}")
+            logger.info(f"Используется локальная HuggingFace модель: {hf_model}")
             if model_mode == "auto":
                 _llm_cache = llm
                 _model_info_cache = model_used
             return llm, model_used
         except Exception as e:
-            print(f"Локальная HuggingFace модель недоступна: {e}")
+            logger.warning(f"Локальная HuggingFace модель недоступна: {e}")
     
     # 3. Fallback на OpenAI/Timeweb (онлайн)
     api_key = os.getenv("timeweb_api")
@@ -138,21 +192,21 @@ def get_llm(model_mode: str = "auto"):
                 temperature=0
             )
             model_used = "OpenAI/Timeweb API"
-            print("✓ Используется OpenAI/Timeweb API (онлайн)")
+            logger.info("Используется OpenAI/Timeweb API (онлайн)")
             if model_mode == "auto":
                 _llm_cache = llm
                 _model_info_cache = model_used
             return llm, model_used
         except Exception as e:
-            print(f"OpenAI/Timeweb недоступен: {e}")
+            logger.warning(f"OpenAI/Timeweb недоступен: {e}")
     
     # 4. Если ничего не доступно, возвращаем None
     if model_mode == "offline":
-        print("⚠ Предупреждение: оффлайн модели недоступны.")
+        logger.warning("Предупреждение: оффлайн модели недоступны.")
     elif model_mode == "online":
-        print("⚠ Предупреждение: онлайн API недоступен.")
+        logger.warning("Предупреждение: онлайн API недоступен.")
     else:
-        print("⚠ Предупреждение: ни одна LLM модель не доступна. Будет использован простой ответ на основе контекста.")
+        logger.warning("Предупреждение: ни одна LLM модель не доступна. Будет использован простой ответ на основе контекста.")
     
     if model_mode == "auto":
         _llm_cache = False  # Кэшируем False, чтобы не пытаться снова
@@ -195,6 +249,9 @@ def safe_filename(filename: str) -> str:
 def create_app() -> Flask:
     app = Flask(__name__, static_folder="static", template_folder="templates")
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    setup_logging()
+    logger = logging.getLogger(__name__)
+    audit_logger = logging.getLogger("audit")
 
     @app.get("/healthz")
     def healthz():
@@ -210,12 +267,18 @@ def create_app() -> Flask:
 
     @app.post("/api/upload")
     def api_upload():
+        request_id = str(uuid.uuid4())
+        client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+
         if "file" not in request.files:
+            logging.getLogger(__name__).warning(f"[{request_id}] Загрузка: отсутствует файл | ip={client_ip}")
             return jsonify({"ok": False, "error": "Нет файла в запросе"}), 400
         file = request.files["file"]
         if file.filename == "":
+            logger.warning(f"[{request_id}] Загрузка: пустое имя файла | ip={client_ip}")
             return jsonify({"ok": False, "error": "Имя файла пустое"}), 400
         if not allowed_file(file.filename):
+            logger.warning(f"[{request_id}] Загрузка: недопустимое расширение '{file.filename}' | ip={client_ip}")
             return jsonify({"ok": False, "error": "Разрешены только .pdf и .txt"}), 400
         
         # Используем безопасную функцию, сохраняющую кириллические символы
@@ -225,7 +288,7 @@ def create_app() -> Flask:
         file.save(save_path)
 
         # Ingest into vector store
-        print(f"Оригинальное имя: {original_filename}, сохранено как: {filename}")
+        logger.info(f"[{request_id}] Загрузка файла: original='{original_filename}', saved_as='{filename}', ip={client_ip}")
         ext = filename.rsplit(".", 1)[1].lower()
         # Используем оригинальное имя файла для doc_id, если не указано явно
         logical_doc_id = request.form.get("doc_id") or original_filename
@@ -251,11 +314,14 @@ def create_app() -> Flask:
                     os.remove(save_path)
             except Exception as cleanup_error:
                 # Логируем ошибку удаления, но не прерываем успешный ответ
-                print(f"Предупреждение: не удалось удалить файл {save_path}: {cleanup_error}")
+                logger.warning(f"[{request_id}] Не удалось удалить файл {save_path}: {cleanup_error}")
             
+            audit_logger.info(f"[{request_id}] UPLOAD ok | doc_id='{logical_doc_id}' | file='{original_filename}' | ip={client_ip}")
             return jsonify({"ok": True, "doc_id": logical_doc_id, "filename": filename})
         except Exception as e:
             # При ошибке оставляем файл для возможной отладки
+            logger.exception(f"[{request_id}] Ошибка обработки загрузки файла '{original_filename}': {e}")
+            audit_logger.info(f"[{request_id}] UPLOAD fail | file='{original_filename}' | error='{str(e)}' | ip={client_ip}")
             return jsonify({"ok": False, "error": str(e)}), 500
 
     @app.get("/chat")
@@ -264,6 +330,8 @@ def create_app() -> Flask:
 
     @app.post("/api/chat")
     def api_chat():
+        request_id = str(uuid.uuid4())
+        client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
         # Поддержка как JSON, так и FormData (для загрузки файлов)
         uploaded_files = []
         question = ""
@@ -314,10 +382,10 @@ def create_app() -> Flask:
                             if os.path.exists(save_path):
                                 os.remove(save_path)
                         except Exception as cleanup_error:
-                            print(f"Предупреждение: не удалось удалить файл {save_path}: {cleanup_error}")
+                            logging.getLogger(__name__).warning(f"[{request_id}] Не удалось удалить временный файл {save_path}: {cleanup_error}")
                             
                     except Exception as e:
-                        print(f"Ошибка при обработке файла {original_filename}: {e}")
+                        logging.getLogger(__name__).error(f"[{request_id}] Ошибка при обработке файла {original_filename}: {e}")
                         # Продолжаем обработку других файлов даже при ошибке
         
         else:
@@ -332,6 +400,7 @@ def create_app() -> Flask:
         
         # Если загружены только файлы без вопроса, возвращаем успешный ответ
         if uploaded_files and not question:
+            audit_logger.info(f"[{request_id}] CHAT files_only | files={len(uploaded_files)} | ip={client_ip}")
             return jsonify({
                 "ok": True,
                 "answer": f"Файлы успешно загружены и добавлены в базу знаний. Теперь вы можете задать вопросы на основе их содержимого.",
@@ -345,6 +414,7 @@ def create_app() -> Flask:
 
         store = load_vectorstore()
         if store is None:
+            logging.getLogger(__name__).warning(f"[{request_id}] Запрос без базы знаний | ip={client_ip}")
             return jsonify({
                 "ok": False,
                 "error": "База знаний пуста. Загрузите документы на странице загрузки.",
@@ -376,16 +446,12 @@ def create_app() -> Flask:
         
         # Логирование для отладки
         if filtered_docs:
-            print(f"Найдено {len(filtered_docs)} релевантных документов:")
-            for i, (doc, score) in enumerate(filtered_docs, 1):
-                doc_id = (doc.metadata or {}).get("doc_id", "unknown")
-                preview = doc.page_content[:100].replace("\n", " ")
-                print(f"  {i}. [doc_id={doc_id}, score={score:.3f}] {preview}...")
+            logger.info(f"[{request_id}] Найдено {len(filtered_docs)} релевантных документов (threshold={relevance_threshold})")
         else:
-            print(f"Предупреждение: не найдено документов с score <= {relevance_threshold}")
+            logger.warning(f"[{request_id}] Не найдено документов с score <= {relevance_threshold}")
             # Если ничего не найдено, берем топ-2 без фильтрации
             docs = [doc for doc, _ in docs_with_scores[:2]]
-            print("Используются топ-2 документа без фильтрации по порогу")
+            logger.info(f"[{request_id}] Используются топ-2 документа без фильтрации по порогу")
         
         context = "\n\n".join([d.page_content for d in docs]) if docs else ""
         
@@ -419,7 +485,7 @@ def create_app() -> Flask:
                 ]
                 answer = llm.invoke(messages).content
             except Exception as e:
-                print(f"Ошибка при генерации ответа LLM: {e}")
+                logger.exception(f"[{request_id}] Ошибка при генерации ответа LLM: {e}")
                 answer = (
                     f"Ошибка при генерации ответа ({str(e)}). "
                     "Ниже приведены наиболее релевантные фрагменты из базы знаний:\n\n" + context[:1500]
@@ -458,6 +524,10 @@ def create_app() -> Flask:
         if uploaded_files:
             response_data["uploaded_files"] = uploaded_files
         
+        # Аудит запроса
+        audit_logger.info(
+            f"[{request_id}] CHAT ok | q_len={len(question)} | files={len(uploaded_files)} | model={model_used or 'fallback'} | ip={client_ip}"
+        )
         return jsonify(response_data)
 
     # Static convenience for uploaded files (only available if upload failed)
@@ -472,6 +542,7 @@ def create_app() -> Flask:
 if __name__ == "__main__":
     application = create_app()
     port = int(os.getenv("PORT", "8000"))
-    application.run(host="0.0.0.0", port=port, debug=True)
+    # Debug отключаем, чтобы избежать двойной инициализации логгеров в reloader
+    application.run(host="0.0.0.0", port=port, debug=False)
 
 
