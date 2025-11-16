@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 
 UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
 ALLOWED_EXTENSIONS = {"pdf", "txt"}
-load_dotenv("api_key.env")
+load_dotenv("config.env")
 
 MAX_MEMORY_TURNS = int(os.getenv("MEMORY_MAX_TURNS", "6"))
 MAX_MEMORY_USER_CONTEXT = int(os.getenv("MEMORY_USER_CONTEXT", "3"))
@@ -66,7 +66,8 @@ def get_llm(model_mode: str = "auto"):
             # Если в кэше есть модель, возвращаем её с информацией о модели
             return _llm_cache, _model_info_cache or "Кэшированная модель"
         if _llm_cache is False:
-            return None, None
+            # Ранее не удалось подобрать модель — пробуем снова (не выходим сразу)
+            print("ℹ Пропуск кэша отказа: повторная попытка подбора LLM в режиме auto")
     
     model_used = None  # Для отслеживания какой модели используется
     
@@ -74,7 +75,6 @@ def get_llm(model_mode: str = "auto"):
     if model_mode in ("auto", "offline") and ChatOllama is not None:
         ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
         ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        
         try:
             llm = ChatOllama(
                 model=ollama_model,
@@ -91,8 +91,8 @@ def get_llm(model_mode: str = "auto"):
                         _llm_cache = llm
                         _model_info_cache = model_used
                     return llm, model_used
-            except Exception:
-                pass  # Ollama не отвечает, пробуем дальше
+            except Exception as probe_error:
+                print(f"Проверка Ollama не удалась, продолжаем подбор: {probe_error}")
         except Exception as e:
             print(f"Ollama недоступен: {e}")
     
@@ -159,7 +159,8 @@ def get_llm(model_mode: str = "auto"):
         print("⚠ Предупреждение: ни одна LLM модель не доступна. Будет использован простой ответ на основе контекста.")
     
     if model_mode == "auto":
-        _llm_cache = False  # Кэшируем False, чтобы не пытаться снова
+        # Не кэшируем отказ навсегда: оставляем возможность повторных попыток
+        _llm_cache = None
         _model_info_cache = None
     return None, None
 
@@ -489,13 +490,15 @@ def create_app() -> Flask:
         )
         
         memory_messages = _history_to_messages(history)
-        
+
         if llm:
             try:
                 messages = [SystemMessage(content=system_prompt)]
+                print('memory_messages', memory_messages)
                 if memory_messages:
                     messages.extend(memory_messages)
                 messages.append(HumanMessage(content=question))
+                print('messages', messages)
                 answer = llm.invoke(messages).content
             except Exception as e:
                 print(f"Ошибка при генерации ответа LLM: {e}")
